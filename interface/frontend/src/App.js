@@ -9,12 +9,11 @@ import ChatInput from './components/ChatInput';
 import FragmentPanel from './components/FragmentPanel';
 import WelcomeScreen from './components/WelcomeScreen';
 
-// Módulos del Bloque 5 (se crean a continuación)
 import ArchivoModule from './modules/Archivo/ArchivoModule';
 import MapaModule from './modules/Mapa/MapaModule';
 
 const API_BASE = 'http://localhost:8000';
-const STORAGE_KEY = 'ec_mensajes_v1';
+const STORAGE_KEY = 'ec_mensajes_v2';
 
 function cargarHistorial() {
   try {
@@ -23,7 +22,6 @@ function cargarHistorial() {
   } catch { return []; }
 }
 
-// ─── Tabs de navegación ────────────────────────────────────────────────────
 const TABS = [
   { id: 'chat',    label: 'El Guía',    icon: '◎' },
   { id: 'archivo', label: 'El Archivo', icon: '▤'  },
@@ -57,7 +55,7 @@ export default function App() {
 
   const enviarPregunta = useCallback(async (pregunta) => {
     if (!pregunta.trim() || loading) return;
-    setTab('chat'); // vuelve al chat si se envía desde otro módulo
+    setTab('chat');
     setMensajes(prev => [...prev, { role: 'user', content: pregunta }]);
     setLoading(true);
 
@@ -74,13 +72,14 @@ export default function App() {
         fuentes: data.fuentes,
         chunks: data.chunks,
         sin_contexto: data.sin_contexto,
+        datos_grafico: data.datos_grafico ?? null,  // ← nuevo
       }]);
     } catch (err) {
       const detail = err?.response?.data?.detail || err.message;
       setMensajes(prev => [...prev, {
         role: 'assistant',
         content: `⚠️ **Error al procesar la consulta**\n\n\`${detail}\`\n\nAsegúrate de que el backend está corriendo:\n\`uvicorn interface.api:app --reload --port 8000\``,
-        fuentes: [], chunks: [],
+        fuentes: [], chunks: [], datos_grafico: null,
       }]);
     } finally {
       setLoading(false);
@@ -93,8 +92,6 @@ export default function App() {
     localStorage.removeItem(STORAGE_KEY);
   };
 
-  // Cuando el usuario hace clic en un chunk desde El Archivo o El Mapa,
-  // abre el FragmentPanel con ese chunk como array de uno
   const abrirFragmento = useCallback((chunk) => {
     setFragmentPanel([chunk]);
   }, []);
@@ -103,7 +100,6 @@ export default function App() {
     <div style={{ position: 'fixed', inset: 0, display: 'flex', overflow: 'hidden' }}>
       <AnimatedBackground />
 
-      {/* Sidebar solo visible en el chat */}
       {tab === 'chat' && (
         <Sidebar
           filtros={filtros}
@@ -118,7 +114,7 @@ export default function App() {
         flex: 1, display: 'flex', flexDirection: 'column',
         position: 'relative', zIndex: 5, overflow: 'hidden',
       }}>
-        {/* ── Barra de navegación superior ── */}
+        {/* ── Navbar ── */}
         <nav style={{
           display: 'flex', alignItems: 'stretch',
           borderBottom: '1px solid rgba(255,255,255,0.45)',
@@ -127,7 +123,6 @@ export default function App() {
           flexShrink: 0,
           padding: '0 1.5rem',
         }}>
-          {/* Logo / título izquierda */}
           <div style={{
             display: 'flex', alignItems: 'center',
             paddingRight: '1.5rem',
@@ -135,18 +130,14 @@ export default function App() {
             marginRight: '1rem',
           }}>
             <span style={{
-              fontFamily: 'var(--serif)',
-              fontSize: '0.85rem',
-              fontWeight: 500,
-              color: 'var(--text-primary)',
-              letterSpacing: '-0.01em',
-              whiteSpace: 'nowrap',
+              fontFamily: 'var(--serif)', fontSize: '0.85rem',
+              fontWeight: 500, color: 'var(--text-primary)',
+              letterSpacing: '-0.01em', whiteSpace: 'nowrap',
             }}>
               Ecosistema de Cristal
             </span>
           </div>
 
-          {/* Tabs */}
           <div style={{ display: 'flex', alignItems: 'stretch', gap: '0.1rem', flex: 1 }}>
             {TABS.map(t => (
               <TabButton
@@ -159,17 +150,12 @@ export default function App() {
             ))}
           </div>
 
-          {/* Badge puntos indexados */}
           {puntosIndexados !== null && (
             <div style={{
               display: 'flex', alignItems: 'center',
-              fontSize: '0.68rem', color: 'var(--text-tertiary)',
-              gap: '0.3rem',
+              fontSize: '0.68rem', color: 'var(--text-tertiary)', gap: '0.3rem',
             }}>
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: '#4CAF50', display: 'inline-block',
-              }} />
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4CAF50', display: 'inline-block' }} />
               {puntosIndexados} fragmentos
             </div>
           )}
@@ -180,17 +166,11 @@ export default function App() {
           {tab === 'chat' && (
             <motion.div
               key="chat"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}
               style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
             >
-              {/* Mensajes */}
-              <div
-                ref={chatContainerRef}
-                style={{ flex: 1, overflowY: 'auto', padding: '1.5rem 2rem 0' }}
-              >
+              <div ref={chatContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '1.5rem 2rem 0' }}>
                 <AnimatePresence initial={false}>
                   {mensajes.length === 0 && !loading
                     ? <WelcomeScreen key="welcome" />
@@ -201,6 +181,7 @@ export default function App() {
                               key={i}
                               content={msg.content}
                               fuentes={msg.fuentes}
+                              datos_grafico={msg.datos_grafico}   // ← nuevo
                               onFuenteClick={() => msg.chunks?.length && setFragmentPanel(msg.chunks)}
                             />
                       )
@@ -211,7 +192,6 @@ export default function App() {
                 </AnimatePresence>
                 <div ref={chatEndRef} style={{ height: '0.5rem' }} />
               </div>
-
               <ChatInput onSubmit={enviarPregunta} disabled={loading} />
             </motion.div>
           )}
@@ -219,44 +199,32 @@ export default function App() {
           {tab === 'archivo' && (
             <motion.div
               key="archivo"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}
               style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >
-              <ArchivoModule
-                apiBase={API_BASE}
-                onChunkClick={abrirFragmento}
-              />
+              <ArchivoModule apiBase={API_BASE} onChunkClick={abrirFragmento} />
             </motion.div>
           )}
 
           {tab === 'mapa' && (
             <motion.div
               key="mapa"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}
               style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
             >
-              <MapaModule
-                apiBase={API_BASE}
-                onChunkClick={abrirFragmento}
-              />
+              <MapaModule apiBase={API_BASE} onChunkClick={abrirFragmento} />
             </motion.div>
           )}
         </AnimatePresence>
       </main>
 
-      {/* FragmentPanel — visible desde cualquier tab */}
       <FragmentPanel chunks={fragmentPanel} onClose={() => setFragmentPanel(null)} />
     </div>
   );
 }
 
-// ─── Componente TabButton ──────────────────────────────────────────────────
 function TabButton({ active, onClick, icon, label }) {
   return (
     <button
@@ -264,18 +232,12 @@ function TabButton({ active, onClick, icon, label }) {
       style={{
         display: 'flex', alignItems: 'center', gap: '0.4rem',
         padding: '0.75rem 1rem',
-        background: 'transparent',
-        border: 'none',
-        borderBottom: active
-          ? '2px solid var(--text-primary)'
-          : '2px solid transparent',
-        cursor: 'pointer',
-        fontSize: '0.78rem',
+        background: 'transparent', border: 'none',
+        borderBottom: active ? '2px solid var(--text-primary)' : '2px solid transparent',
+        cursor: 'pointer', fontSize: '0.78rem',
         fontWeight: active ? 600 : 400,
         color: active ? 'var(--text-primary)' : 'var(--text-tertiary)',
-        letterSpacing: '-0.01em',
-        transition: 'all 0.15s ease',
-        whiteSpace: 'nowrap',
+        letterSpacing: '-0.01em', transition: 'all 0.15s ease', whiteSpace: 'nowrap',
       }}
     >
       <span style={{ fontSize: '0.9rem', lineHeight: 1 }}>{icon}</span>

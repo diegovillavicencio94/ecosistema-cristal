@@ -1,24 +1,8 @@
 """
-chain.py — Cadena RAG completa: pregunta → retriever → llm → respuesta.
-
-Qué hace:
-  - Orquesta la secuencia completa del RAG en una sola función
-  - Expone una interfaz limpia que usan pipeline.py y app.py
-  - Añade logging de trazabilidad para ver qué chunks se usaron
-
-Por qué existe separado de retriever.py y llm.py:
-  retriever.py sabe buscar. llm.py sabe generar. chain.py sabe
-  en qué orden llamar a cada uno y cómo pasarles los datos.
-  Separar responsabilidades facilita testear cada pieza por separado
-  y cambiar una sin afectar a las otras.
-
-Flujo completo:
-  pregunta (str)
-    → retriever.buscar()       → chunks relevantes
-    → llm.generar_respuesta()  → texto en lenguaje ciudadano
-    → RespuestaRAG             → respuesta + fuentes + metadatos
+chain.py — Cadena RAG completa: pregunta -> retriever -> llm -> respuesta + grafico.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -29,65 +13,159 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-# Importamos los módulos que ya tenemos construidos y testeados
 from rag.retriever import buscar
 from rag.llm import generar_respuesta
+from config import TOP_K_RESULTS, GOOGLE_API_KEY, GEMINI_MODEL, GRAFICO_AGRESIVIDAD
 
-from config import TOP_K_RESULTS
-
-# ─── Logging ────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
 # ESTRUCTURA DE RESPUESTA
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
 
 @dataclass
 class RespuestaRAG:
+    pregunta:      str
+    respuesta:     str
+    chunks:        list[dict] = field(default_factory=list)
+    fuentes:       list[dict] = field(default_factory=list)
+    sin_contexto:  bool = False
+    datos_grafico: Optional[dict] = None
+
+
+# ============================================================
+# DETECCION DE GRAFICO
+# ============================================================
+
+PROMPT_CONSERVADOR = (
+    "Analiza estos fragmentos de presupuestos publicos y determina si contienen "
+    "datos numericos claramente tabulados y comparables (ej: importes por consejeria, "
+    "capitulos de gasto, variaciones entre anios). Solo extrae datos si son "
+    "inequivocamente graficables como tabla estructurada. "
+    "Si hay cualquier ambiguedad, devuelve null."
+)
+
+PROMPT_MODERADO = (
+    "Analiza estos fragmentos de presupuestos publicos y determina si contienen "
+    "datos numericos relevantes que permitan una comparacion visual (tablas O texto "
+    "con cifras concretas asociadas a categorias). Extrae si los datos tienen al "
+    "menos 2 categorias con valores numericos claros."
+)
+
+PROMPT_AGRESIVO = (
+    "Analiza estos fragmentos de presupuestos publicos e intenta extraer cualquier "
+    "dato numerico que pueda visualizarse. Si hay cifras con etiquetas, extraelas."
+)
+
+PROMPTS_AGRESIVIDAD = {
+    "conservador": PROMPT_CONSERVADOR,
+    "moderado":    PROMPT_MODERADO,
+    "agresivo":    PROMPT_AGRESIVO,
+}
+
+INSTRUCCION_JSON = (
+    "Si hay datos graficables devuelve UNICAMENTE un JSON valido con esta estructura:\n"
+    '{"tipo": "bar", "titulo": "titulo descriptivo", "unidad": "millones de euros", '
+    '"comparativo": false, "datos": [{"nombre": "etiqueta", "valor": numero}]}\n\n'
+    "Si hay dos series temporales (2025 vs 2026) usa:\n"
+    '{"tipo": "bar", "titulo": "titulo", "unidad": "millones de euros", '
+    '"comparativo": true, "etiqueta_a": "2025", "etiqueta_b": "2026", '
+    '"datos_comparativo": [{"nombre": "etiqueta", "valor_a": numero, "valor_b": numero}]}\n\n'
+    "Reglas: maximo 12 categorias, solo valores numericos, "
+    "si no hay datos graficables devuelve exactamente: null\n"
+    "No añadas texto ni explicaciones fuera del JSON."
+)
+
+
+def detectar_grafico(chunks: list[dict], pregunta: str) -> Optional[dict]:
     """
-    Estructura de datos que devuelve el chain.
-
-    Usamos un dataclass (en lugar de un dict) para que el resto del código
-    acceda a los campos con autocompletado y sin riesgo de typos en las keys.
-
-    Campos:
-        pregunta:    La pregunta original del usuario
-        respuesta:   Texto generado por el LLM en lenguaje ciudadano
-        chunks:      Los fragmentos recuperados de Qdrant (para trazabilidad)
-        fuentes:     Lista deduplicada de (documento, página) usados
-        sin_contexto: True si el retriever no encontró nada relevante
+    Analiza los chunks y devuelve estructura Recharts si detecta datos graficables.
+    Usa google.genai (no el deprecado google.generativeai).
     """
-    pregunta:     str
-    respuesta:    str
-    chunks:       list[dict] = field(default_factory=list)
-    fuentes:      list[dict] = field(default_factory=list)
-    sin_contexto: bool = False
+    chunks_tabla = [c for c in chunks if c.get("type") == "table"]
+
+    if GRAFICO_AGRESIVIDAD == "conservador" and not chunks_tabla:
+        logger.info("[GRAFICO] Sin tablas — omitiendo (conservador)")
+        return None
+
+    chunks_para_analizar = chunks_tabla if GRAFICO_AGRESIVIDAD == "conservador" else chunks
+    partes_contexto = []
+    for i, c in enumerate(chunks_para_analizar[:4]):
+        partes_contexto.append(
+            "[Fragmento " + str(i+1) + " - " + str(c.get("source","?")) +
+            " pag." + str(c.get("page","?")) + "]\n" + str(c.get("content",""))
+        )
+    contexto = "\n\n---\n\n".join(partes_contexto)
+
+    instruccion = PROMPTS_AGRESIVIDAD.get(GRAFICO_AGRESIVIDAD, PROMPT_CONSERVADOR)
+
+    prompt = (
+        instruccion + "\n\n"
+        "Pregunta del usuario: " + pregunta + "\n\n"
+        "Fragmentos a analizar:\n" + contexto + "\n\n"
+        + INSTRUCCION_JSON
+    )
+
+    try:
+        from google import genai as google_genai
+        from google.genai import types as genai_types
+
+        cliente = google_genai.Client(
+            api_key=GOOGLE_API_KEY,
+            http_options=genai_types.HttpOptions(api_version="v1beta"),
+        )
+        respuesta = cliente.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=4096,
+            ),
+        )
+        texto = respuesta.text.strip()
+        logger.info("[GRAFICO DEBUG] Respuesta raw de Gemini: " + repr(texto[:500]))
 
 
-# ════════════════════════════════════════════════════════════════════════════
+        # Limpiar backticks de markdown si los hay
+        if "```" in texto:
+            partes = texto.split("```")
+            # el JSON suele estar en partes[1]
+            texto = partes[1] if len(partes) > 1 else partes[0]
+            if texto.startswith("json"):
+                texto = texto[4:]
+        texto = texto.strip()
+
+        if texto.lower() == "null" or texto == "":
+            logger.info("[GRAFICO] No hay datos graficables")
+            return None
+
+        datos = json.loads(texto)
+
+        if not isinstance(datos, dict):
+            return None
+        if "tipo" not in datos or ("datos" not in datos and "datos_comparativo" not in datos):
+            return None
+
+        logger.info("[GRAFICO] Detectado: tipo=" + str(datos.get("tipo")) + " | " + str(datos.get("titulo")))
+        return datos
+
+    except json.JSONDecodeError as e:
+        logger.warning("[GRAFICO] JSON invalido: " + str(e))
+        return None
+    except Exception as e:
+        logger.warning("[GRAFICO] Error: " + str(e))
+        return None
+
+
+# ============================================================
 # UTILIDADES
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
 
 def extraer_fuentes(chunks: list[dict]) -> list[dict]:
-    """
-    Construye una lista deduplicada de fuentes a partir de los chunks.
-
-    Si el mismo documento aparece en varios chunks, lo listamos una sola vez.
-    El LLM ya cita las páginas en el texto; esta lista es para la interfaz
-    (Streamlit puede mostrarla como referencias al pie).
-
-    Returns:
-        Lista de dicts únicos: [{source, page, doc_type, año}, ...]
-        ordenados por documento y página
-    """
     vistas = set()
     fuentes = []
-
     for chunk in chunks:
         clave = (chunk.get("source", ""), chunk.get("page"))
         if clave not in vistas:
@@ -96,17 +174,15 @@ def extraer_fuentes(chunks: list[dict]) -> list[dict]:
                 "source":   chunk.get("source", ""),
                 "page":     chunk.get("page"),
                 "doc_type": chunk.get("doc_type"),
-                "año":      chunk.get("año"),
+                "anio":     chunk.get("año"),
             })
-
-    # Ordenamos por nombre de fuente y luego por página
     fuentes.sort(key=lambda f: (f["source"], f["page"] or 0))
     return fuentes
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# FUNCIÓN PRINCIPAL
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
+# FUNCION PRINCIPAL
+# ============================================================
 
 def preguntar(
     pregunta: str,
@@ -117,27 +193,8 @@ def preguntar(
     tipo_chunk: Optional[str] = None,
     score_minimo: float = 0.0,
 ) -> RespuestaRAG:
-    """
-    Función principal del RAG. Recibe una pregunta y devuelve una respuesta
-    con fuentes citadas.
+    logger.info("[RAG] Pregunta: '" + pregunta + "'")
 
-    Es la única función que necesitan conocer pipeline.py y app.py.
-
-    Args:
-        pregunta:     Pregunta en lenguaje natural
-        top_k:        Número de chunks a recuperar (default: config TOP_K_RESULTS)
-        año:          Filtrar por año presupuestario
-        comunidad:    Filtrar por comunidad autónoma
-        tipo_doc:     Filtrar por tipo de documento
-        tipo_chunk:   Filtrar por tipo de chunk ("text" o "table")
-        score_minimo: Umbral mínimo de similitud (0.0 = sin umbral)
-
-    Returns:
-        RespuestaRAG con respuesta, chunks usados y fuentes
-    """
-    logger.info(f"[RAG] Pregunta: '{pregunta}'")
-
-    # ── Paso 1: Recuperar chunks relevantes ─────────────────────────────
     chunks = buscar(
         pregunta=pregunta,
         top_k=top_k,
@@ -153,29 +210,23 @@ def preguntar(
         return RespuestaRAG(
             pregunta=pregunta,
             respuesta=(
-                "No encontré información relevante en los documentos disponibles. "
-                "Prueba a reformular la pregunta o a ser más específico."
+                "No encontre informacion relevante en los documentos disponibles. "
+                "Prueba a reformular la pregunta o a ser mas especifico."
             ),
-            chunks=[],
-            fuentes=[],
-            sin_contexto=True,
+            chunks=[], fuentes=[], sin_contexto=True, datos_grafico=None,
         )
 
-    logger.info(
-        f"[RAG] {len(chunks)} chunks recuperados | "
-        f"scores: {[c['score'] for c in chunks]}"
-    )
+    logger.info("[RAG] " + str(len(chunks)) + " chunks | scores: " + str([c["score"] for c in chunks]))
 
-    # ── Paso 2: Generar respuesta con el LLM ────────────────────────────
-    respuesta = generar_respuesta(
-        pregunta=pregunta,
-        chunks=chunks,
-    )
-
-    # ── Paso 3: Extraer fuentes para la interfaz ─────────────────────────
+    respuesta = generar_respuesta(pregunta=pregunta, chunks=chunks)
+    datos_grafico = detectar_grafico(chunks=chunks, pregunta=pregunta)
     fuentes = extraer_fuentes(chunks)
 
-    logger.info(f"[RAG] Respuesta generada ({len(respuesta)} chars) | {len(fuentes)} fuentes")
+    logger.info(
+        "[RAG] Respuesta: " + str(len(respuesta)) + " chars | "
+        "Fuentes: " + str(len(fuentes)) + " | "
+        "Grafico: " + ("si" if datos_grafico else "no")
+    )
 
     return RespuestaRAG(
         pregunta=pregunta,
@@ -183,59 +234,30 @@ def preguntar(
         chunks=chunks,
         fuentes=fuentes,
         sin_contexto=False,
+        datos_grafico=datos_grafico,
     )
 
 
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
 # TEST BLOCK
-# ════════════════════════════════════════════════════════════════════════════
+# ============================================================
 
 if __name__ == "__main__":
-    """
-    Test de integración completo: pregunta → Qdrant → Gemini → respuesta.
-
-    Este es el test más importante hasta ahora — conecta todo el pipeline
-    RAG por primera vez con datos reales.
-
-    Requisitos:
-      - Qdrant corriendo: docker compose up -d
-      - Colección indexada (embedder.py ejecutado)
-      - GOOGLE_API_KEY en .env con gemini-2.5-flash disponible
-
-    Uso:
-        python rag/chain.py
-        python rag/chain.py "¿Cuánto se gasta en educación en 2026?"
-    """
-    import sys
-
     if len(sys.argv) > 1:
         preguntas = [" ".join(sys.argv[1:])]
     else:
         preguntas = [
-            "¿Cuánto se gasta en sanidad en el presupuesto de Madrid para 2026?",
-            "¿Qué es el capítulo 1 de gastos de personal y cuánto supone?",
-            "¿Cuáles son los ingresos totales previstos para 2026?",
+            "Cual es el presupuesto por consejeria en 2026?",
         ]
 
     for pregunta in preguntas:
-        print(f"\n{'='*60}")
-        print(f"PREGUNTA: {pregunta}")
-        print(f"{'='*60}")
-
+        print("\n" + "="*60)
+        print("PREGUNTA: " + pregunta)
+        print("="*60)
         resultado = preguntar(pregunta)
-
-        print(f"\nRESPUESTA:")
-        print(resultado.respuesta)
-
-        print(f"\nCHUNKS USADOS ({len(resultado.chunks)}):")
-        for i, chunk in enumerate(resultado.chunks, 1):
-            print(
-                f"  {i}. [{chunk['type']}] {chunk['source']} · "
-                f"pág. {chunk['page']} · score {chunk['score']}"
-            )
-
-        print(f"\nFUENTES ÚNICAS ({len(resultado.fuentes)}):")
-        for f in resultado.fuentes:
-            print(f"  - {f['source']} · pág. {f['page']} ({f['doc_type']}, {f['año']})")
-
-        print(f"\nSin contexto: {resultado.sin_contexto}")
+        print("\nRESPUESTA:\n" + resultado.respuesta)
+        print("\nCHUNKS: " + str([(c["type"], c["score"]) for c in resultado.chunks]))
+        if resultado.datos_grafico:
+            print("\nGRAFICO: " + json.dumps(resultado.datos_grafico, ensure_ascii=False, indent=2))
+        else:
+            print("\nGRAFICO: No detectado")

@@ -1,8 +1,153 @@
-import React from 'react';
-import { motion } from 'framer-motion';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {
+  BarChart, Bar, PieChart, Pie, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  Cell, ResponsiveContainer,
+} from 'recharts';
 
+// ─── Paleta de colores para gráficos ─────────────────────────────────────────
+const COLORES_GRAFICO = [
+  '#3B6B9E', '#C8882A', '#4A9068', '#8B3A8B', '#C84444',
+  '#2A8888', '#9E7A3B', '#6B3B9E', '#9E3B6B', '#4A6890',
+];
+
+// ─── Tooltip personalizado ────────────────────────────────────────────────────
+function TooltipCustom({ active, payload, label, unidad }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: 'rgba(247,244,239,0.97)',
+      backdropFilter: 'blur(16px)',
+      border: '1px solid rgba(255,255,255,0.85)',
+      borderRadius: 10, padding: '0.65rem 0.9rem',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.10)',
+      fontSize: '0.75rem',
+    }}>
+      <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.3rem' }}>{label}</div>
+      {payload.map((entry, i) => (
+        <div key={i} style={{ color: entry.color, display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+          <span style={{ fontWeight: 500 }}>{entry.name || 'valor'}:</span>
+          <span>{entry.value?.toLocaleString('es-ES')} {unidad}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Gráfico principal ────────────────────────────────────────────────────────
+function GraficoRecharts({ datos_grafico }) {
+  if (!datos_grafico) return null;
+
+  const { tipo, titulo, unidad = '', comparativo, datos, datos_comparativo, etiqueta_a, etiqueta_b } = datos_grafico;
+
+  // Altura adaptada al número de categorías
+  const items = comparativo ? datos_comparativo : datos;
+  const altura = Math.max(240, Math.min(380, (items?.length || 5) * 36));
+
+  const tooltipProps = {
+    content: <TooltipCustom unidad={unidad} />,
+    cursor: { fill: 'rgba(59,107,158,0.06)' },
+  };
+
+  const ejeStyle = {
+    fontSize: '0.68rem',
+    fill: 'var(--text-tertiary)',
+    fontFamily: 'var(--sans)',
+  };
+
+  // ── BAR comparativo (2 series) ───────────────────────────────────────────
+  if (tipo === 'bar' && comparativo && datos_comparativo) {
+    return (
+      <ResponsiveContainer width="100%" height={altura}>
+        <BarChart data={datos_comparativo} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+          <XAxis dataKey="nombre" tick={ejeStyle} tickLine={false} axisLine={false} />
+          <YAxis tick={ejeStyle} tickLine={false} axisLine={false}
+            tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+          <Tooltip {...tooltipProps} />
+          <Legend wrapperStyle={{ fontSize: '0.72rem', paddingTop: '0.5rem' }} />
+          <Bar dataKey="valor_a" name={etiqueta_a || 'Serie A'} fill={COLORES_GRAFICO[0]}
+            radius={[4,4,0,0]} maxBarSize={40} />
+          <Bar dataKey="valor_b" name={etiqueta_b || 'Serie B'} fill={COLORES_GRAFICO[1]}
+            radius={[4,4,0,0]} maxBarSize={40} />
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  // ── BAR simple ───────────────────────────────────────────────────────────
+  if (tipo === 'bar' && datos) {
+    return (
+      <ResponsiveContainer width="100%" height={altura}>
+        <BarChart data={datos} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+          <XAxis dataKey="nombre" tick={ejeStyle} tickLine={false} axisLine={false} />
+          <YAxis tick={ejeStyle} tickLine={false} axisLine={false}
+            tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+          <Tooltip {...tooltipProps} />
+          <Bar dataKey="valor" name={unidad} radius={[4,4,0,0]} maxBarSize={48}>
+            {datos.map((_, i) => (
+              <Cell key={i} fill={COLORES_GRAFICO[i % COLORES_GRAFICO.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  // ── PIE ──────────────────────────────────────────────────────────────────
+  if (tipo === 'pie' && datos) {
+    const total = datos.reduce((s, d) => s + (d.valor || 0), 0);
+    return (
+      <ResponsiveContainer width="100%" height={Math.max(260, altura)}>
+        <PieChart>
+          <Pie
+            data={datos}
+            dataKey="valor"
+            nameKey="nombre"
+            cx="50%" cy="50%"
+            outerRadius="72%"
+            innerRadius="38%"
+            paddingAngle={2}
+            label={({ nombre, valor }) =>
+              `${nombre}: ${((valor / total) * 100).toFixed(1)}%`
+            }
+            labelLine={false}
+          >
+            {datos.map((_, i) => (
+              <Cell key={i} fill={COLORES_GRAFICO[i % COLORES_GRAFICO.length]} />
+            ))}
+          </Pie>
+          <Tooltip content={<TooltipCustom unidad={unidad} />} />
+          <Legend wrapperStyle={{ fontSize: '0.70rem' }} />
+        </PieChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  // ── LINE ─────────────────────────────────────────────────────────────────
+  if (tipo === 'line' && datos) {
+    return (
+      <ResponsiveContainer width="100%" height={altura}>
+        <LineChart data={datos} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+          <XAxis dataKey="nombre" tick={ejeStyle} tickLine={false} axisLine={false} />
+          <YAxis tick={ejeStyle} tickLine={false} axisLine={false} />
+          <Tooltip content={<TooltipCustom unidad={unidad} />} />
+          <Line type="monotone" dataKey="valor" stroke={COLORES_GRAFICO[0]}
+            strokeWidth={2} dot={{ r: 4, fill: COLORES_GRAFICO[0] }} />
+        </LineChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  return null;
+}
+
+// ─── UserMessage ──────────────────────────────────────────────────────────────
 export function UserMessage({ content }) {
   return (
     <motion.div
@@ -29,14 +174,20 @@ export function UserMessage({ content }) {
   );
 }
 
-export function AssistantMessage({ content, fuentes, onFuenteClick }) {
-  // Strip inline source lines that llm.py sometimes appends
-  // (lines starting with 📄 Fuente: or "Fuente:")
+// ─── AssistantMessage ─────────────────────────────────────────────────────────
+export function AssistantMessage({ content, fuentes, datos_grafico, onFuenteClick }) {
+  const [graficoVisible, setGraficoVisible] = useState(true);
+
   const cleanContent = content
     .split('\n')
     .filter(line => !/^(📄\s*)?Fuente:/i.test(line.trim()))
     .join('\n')
     .trim();
+
+  const hayGrafico = datos_grafico && (
+    datos_grafico.datos?.length > 0 ||
+    datos_grafico.datos_comparativo?.length > 0
+  );
 
   return (
     <motion.div
@@ -66,12 +217,70 @@ export function AssistantMessage({ content, fuentes, onFuenteClick }) {
           padding:'1.15rem 1.35rem',
           boxShadow:'0 8px 32px rgba(120,100,60,0.08), inset 0 1px 0 rgba(255,255,255,0.85)',
         }}>
-          {/* Markdown content */}
+          {/* Texto de respuesta */}
           <div className="markdown-body" style={{ fontSize:'0.9rem', color:'var(--text-primary)', lineHeight:1.72 }}>
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
           </div>
 
-          {/* Source capsules */}
+          {/* Gráfico */}
+          {hayGrafico && (
+            <div style={{ marginTop:'1rem' }}>
+              {/* Header del gráfico */}
+              <div style={{
+                display:'flex', alignItems:'center', justifyContent:'space-between',
+                marginBottom: graficoVisible ? '0.75rem' : 0,
+              }}>
+                <div style={{ display:'flex', alignItems:'center', gap:'0.4rem' }}>
+                  <span style={{ fontSize:'0.72rem' }}>📊</span>
+                  <span style={{ fontSize:'0.72rem', fontWeight:600, color:'var(--text-secondary)', letterSpacing:'0.02em' }}>
+                    {datos_grafico.titulo}
+                  </span>
+                  {datos_grafico.unidad && (
+                    <span style={{ fontSize:'0.65rem', color:'var(--text-tertiary)' }}>
+                      ({datos_grafico.unidad})
+                    </span>
+                  )}
+                </div>
+                <motion.button
+                  whileHover={{ scale:1.03 }}
+                  whileTap={{ scale:0.97 }}
+                  onClick={() => setGraficoVisible(v => !v)}
+                  style={{
+                    background:'rgba(0,0,0,0.04)',
+                    border:'1px solid rgba(0,0,0,0.08)',
+                    borderRadius:20, padding:'0.18rem 0.65rem',
+                    fontSize:'0.65rem', color:'var(--text-tertiary)',
+                    cursor:'pointer', fontFamily:'var(--sans)',
+                  }}
+                >
+                  {graficoVisible ? 'Ocultar gráfico' : 'Ver gráfico'}
+                </motion.button>
+              </div>
+
+              {/* Gráfico animado */}
+              <AnimatePresence>
+                {graficoVisible && (
+                  <motion.div
+                    initial={{ opacity:0, height:0 }}
+                    animate={{ opacity:1, height:'auto' }}
+                    exit={{ opacity:0, height:0 }}
+                    transition={{ duration:0.3, ease:[0.22,1,0.36,1] }}
+                    style={{
+                      overflow:'hidden',
+                      background:'rgba(255,255,255,0.4)',
+                      borderRadius:12,
+                      padding:'1rem 0.5rem 0.5rem',
+                      border:'1px solid rgba(255,255,255,0.7)',
+                    }}
+                  >
+                    <GraficoRecharts datos_grafico={datos_grafico} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* Fuentes */}
           {fuentes && fuentes.length > 0 && (
             <div style={{ marginTop:'1rem', paddingTop:'0.85rem', borderTop:'1px solid rgba(120,100,60,0.1)' }}>
               <div style={{ fontSize:'0.64rem', textTransform:'uppercase', letterSpacing:'0.12em',
@@ -91,6 +300,7 @@ export function AssistantMessage({ content, fuentes, onFuenteClick }) {
   );
 }
 
+// ─── SourceCapsule ────────────────────────────────────────────────────────────
 function SourceCapsule({ fuente, onClick }) {
   const nombre = (fuente.source || '').replace('.pdf','').replace(/_/g,' ');
   const corto = nombre.length > 26 ? nombre.slice(0,26) + '…' : nombre;
@@ -122,7 +332,7 @@ function SourceCapsule({ fuente, onClick }) {
   );
 }
 
-// Animated typing dots
+// ─── TypingIndicator ──────────────────────────────────────────────────────────
 export function TypingIndicator() {
   return (
     <motion.div
