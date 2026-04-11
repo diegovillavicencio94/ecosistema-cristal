@@ -1,0 +1,18 @@
+# Secretos — NUNCA al repo
+.env
+
+# Datos (los PDFs son tuyos, no del equipo)
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node (se regenera con npm install)
+interface/frontend/node_modules/
+interface/frontend/build/
+
+# macOS
+.DS_Store
